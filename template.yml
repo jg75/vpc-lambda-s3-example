@@ -1,0 +1,231 @@
+AWSTemplateFormatVersion: 2010-09-09
+Transform: AWS::Serverless-2016-10-31
+Description: AWS VPC Lambda with S3 VPC Gateway
+
+Globals:
+  Function:
+    Handler: app.handler
+    Runtime: python3.7
+    Timeout: 3
+
+Parameters:
+  VpcCidrBlock:
+    Description: The VPC CIDR block
+    Type: String
+
+  PrimarySubnetCidrBlock:
+    Description: The Pimary Public Subnet CIDR block
+    Type: String
+
+  SecondarySubnetCidrBlock:
+    Description: The Secondary Public Subnet CIDR block
+    Type: String
+
+  S3Key:
+    Description: The S3 Key name
+    Type: String
+    Default: foo.bar
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidrBlock
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}
+    DependsOn:
+      - Vpc
+
+  PrimarySubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        !Ref Vpc
+      CidrBlock: !Ref PrimarySubnetCidrBlock
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-primary
+    DependsOn:
+      - Vpc
+
+  PrimarySubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref PrimarySubnet
+    DependsOn:
+      - PrimarySubnet
+      - RouteTable
+
+  SecondarySubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId:
+        !Ref Vpc
+      CidrBlock: !Ref SecondarySubnetCidrBlock
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-secondary
+    DependsOn:
+      - Vpc
+
+  SecondarySubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref SecondarySubnet
+    DependsOn:
+      - SecondarySubnet
+      - RouteTable
+
+  S3VpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      VpcId: !Ref Vpc
+      RouteTableIds:
+        - !Ref RouteTable
+    DependsOn:
+      - Vpc
+      - RouteTable
+
+  FooSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: Foo Function
+      GroupName: FooFunction
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-foo
+      VpcId: !Ref Vpc
+    DependsOn:
+      - Vpc
+
+  FooFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-foo
+      Description: Foo the object into S3
+      CodeUri: foo/
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref S3Bucket
+          S3_KEY: !Ref S3Key
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref S3Bucket
+        - VPCAccessPolicy: {}
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrimarySubnet
+          - !Ref SecondarySubnet
+        SecurityGroupIds:
+          - !Ref FooSecurityGroup
+      Events:
+        Foo:
+          Type: Api
+          Properties:
+            Path: /foo
+            Method: get
+    DependsOn:
+      - Vpc
+      - PrimarySubnet
+      - SecondarySubnet
+      - FooSecurityGroup
+      - S3Bucket
+
+  BarSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: Bar Function
+      GroupName: BarFunction
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-bar
+      VpcId: !Ref Vpc
+    DependsOn:
+      - Vpc
+
+  BarFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-bar
+      Description: Bar the object out of S3
+      CodeUri: bar/
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref S3Bucket
+          S3_KEY: !Ref S3Key
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref S3Bucket
+        - VPCAccessPolicy: {}
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrimarySubnet
+          - !Ref SecondarySubnet
+        SecurityGroupIds:
+          - !Ref BarSecurityGroup
+      Events:
+        Foo:
+          Type: Api
+          Properties:
+            Path: /bar
+            Method: get
+    DependsOn:
+      - Vpc
+      - PrimarySubnet
+      - SecondarySubnet
+      - BarSecurityGroup
+      - S3Bucket
+
+Outputs:
+  S3Bucket:
+    Description: The S3 Bucket
+    Value: !Ref S3Bucket
+
+  Vpc:
+    Description: The VPC ID
+    Value: !Ref Vpc
+
+  FooApi:
+    Description: API Gateway endpoint URL for Prod stage
+    Value: !Sub https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/foo/
+
+  FooFunction:
+    Description: Foo Function ARN
+    Value: !GetAtt FooFunction.Arn
+
+  FooFunctionIamRole:
+    Description: Implicit IAM Role created for Foo Function
+    Value: !GetAtt FooFunctionRole.Arn
+
+  BarApi:
+    Description: API Gateway endpoint URL for Prod stage
+    Value: !Sub https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/prod/bar/
+
+  BarFunction:
+    Description: Bar Function ARN
+    Value: !GetAtt BarFunction.Arn
+
+  BarFunctionIamRole:
+    Description: Implicit IAM Role created for Bar Function
+    Value: !GetAtt BarFunctionRole.Arn
